@@ -37,7 +37,7 @@ if platform.system() == "Linux":
             os.environ["XMODIFIERS"] = "@im=ibus"
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, filedialog
 
 # 版本信息
 VERSION = "8.5.0"
@@ -141,6 +141,7 @@ CATS = [
 
 CFG = {
     "proxy": "127.0.0.1:7897",
+    "browser_path": "",
     "base": "https://linux.do",
     "connect": "https://connect.linux.do",
     "like_rate": 0.3,
@@ -288,6 +289,10 @@ class Bot:
         for attempt in range(max_retries):
             try:
                 co = ChromiumOptions()
+
+                # 设置浏览器路径
+                if s.cfg.get("browser_path"):
+                    co.set_browser_path(s.cfg["browser_path"])
 
                 # 设置用户数据目录
                 user_data_dir = os.path.join(os.getcwd(), "browser_data")
@@ -1924,6 +1929,25 @@ class GUI:
             insertbackground="#eaeaea",
         ).pack(side=tk.LEFT, padx=5)
 
+        tk.Label(ctrl, text="浏览器:", bg="#1a1a2e", fg="#eaeaea").pack(side=tk.LEFT)
+        s.browser_path_var = tk.StringVar(value=s.cfg["browser_path"])
+        tk.Entry(
+            ctrl,
+            textvariable=s.browser_path_var,
+            width=30,
+            bg="#16213e",
+            fg="#eaeaea",
+            insertbackground="#eaeaea",
+        ).pack(side=tk.LEFT, padx=5)
+        tk.Button(
+            ctrl,
+            text="...",
+            command=s._browse_browser,
+            width=3,
+            bg="#0f3460",
+            fg="white",
+        ).pack(side=tk.LEFT)
+
         s.start_btn = tk.Button(
             ctrl,
             text="开始",
@@ -2377,11 +2401,20 @@ class GUI:
 
         s.rt.after(0, log)
 
+    def _browse_browser(s):
+        path = tk.filedialog.askopenfilename(
+            title="选择浏览器",
+            filetypes=[("可执行文件", "*.exe"), ("所有文件", "*.*")],
+        )
+        if path:
+            s.browser_path_var.set(path)
+
     def _start(s):
         if s.th and s.th.is_alive():
             return
         # 更新配置
         s.cfg["proxy"] = s.proxy_var.get()
+        s.cfg["browser_path"] = s.browser_path_var.get()
         try:
             s.cfg["like_rate"] = int(s.like_var.get()) / 100
         except:
