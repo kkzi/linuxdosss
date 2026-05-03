@@ -91,6 +91,29 @@ def get_icon_path():
     return os.path.join(base_path, "icon.ico")
 
 
+def get_state_file_path():
+    """获取界面状态文件路径"""
+    home = os.path.expanduser("~")
+
+    if platform.system() == "Windows":
+        config_root = os.environ.get("APPDATA") or home
+    elif platform.system() == "Darwin":
+        config_root = os.path.join(home, "Library", "Application Support")
+    else:
+        config_root = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+
+    state_dir = os.path.join(config_root, "LinuxDoHelper")
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        return os.path.join(state_dir, "gui_state.json")
+    except OSError:
+        if getattr(sys, "frozen", False):
+            fallback_dir = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            fallback_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(fallback_dir, "gui_state.json")
+
+
 def create_tray_image(color="#0f3460"):
     """创建托盘图标图像"""
     size = 64
@@ -1446,6 +1469,9 @@ class GUI:
         s.th = None
         s.req_labels = {}  # 升级要求标签
         s.initial_requirements = []  # 初始升级要求
+        s.state_file = get_state_file_path()
+        s._state_save_job = None
+        s._restoring_state = False
 
         # 窗口拖动相关（保留以备后用）
         s._drag_x = 0
@@ -1457,9 +1483,11 @@ class GUI:
         s._running_status = "就绪"
 
         s._ui()
+        s._bind_state_persistence()
 
-        # 窗口居中
-        s._center_window()
+        # 恢复界面状态；如果没有历史状态则居中显示
+        if not s._load_ui_state():
+            s._center_window()
 
         # 初始化托盘
         if TRAY_SUPPORT:
@@ -1688,6 +1716,7 @@ class GUI:
 
     def _close(s):
         """关闭窗口"""
+        s._save_ui_state()
         if s.bot:
             s.bot.stop()
         if s.tray_icon:
@@ -1696,6 +1725,139 @@ class GUI:
             except:
                 pass
         s.rt.destroy()
+
+    def _bind_state_persistence(s):
+        """绑定界面状态自动保存"""
+        tracked_vars = [
+            s.mode_var,
+            s.topics_var,
+            s.time_var,
+            s.browse_mode_var,
+            s.proxy_var,
+            s.browser_path_var,
+            s.enable_like_var,
+            s.like_var,
+            s.enable_reply_var,
+            s.reply_var,
+            s.enable_wait_var,
+            s.wait_var,
+        ]
+        tracked_vars.extend(s.cat_vars.values())
+
+        for var in tracked_vars:
+            var.trace_add("write", s._on_ui_state_change)
+
+        s.rt.bind("<Configure>", s._on_window_configure, add="+")
+
+    def _on_ui_state_change(s, *args):
+        """界面控件变更后延迟保存，避免频繁写盘"""
+        if s._restoring_state:
+            return
+        s._schedule_state_save()
+
+    def _on_window_configure(s, event):
+        """窗口大小或位置变化后保存状态"""
+        if event.widget is s.rt and not s._restoring_state:
+            s._schedule_state_save()
+
+    def _schedule_state_save(s):
+        """调度界面状态保存"""
+        if s._state_save_job:
+            s.rt.after_cancel(s._state_save_job)
+        s._state_save_job = s.rt.after(300, s._save_ui_state)
+
+    def _collect_ui_state(s):
+        """收集当前界面控件状态"""
+        return {
+            "geometry": s.rt.geometry(),
+            "mode": s.mode_var.get(),
+            "topics": s.topics_var.get(),
+            "time": s.time_var.get(),
+            "browse_mode": s.browse_mode_var.get(),
+            "proxy": s.proxy_var.get(),
+            "browser_path": s.browser_path_var.get(),
+            "categories": {name: var.get() for name, var in s.cat_vars.items()},
+            "enable_like": s.enable_like_var.get(),
+            "like_rate": s.like_var.get(),
+            "enable_reply": s.enable_reply_var.get(),
+            "reply_rate": s.reply_var.get(),
+            "enable_wait": s.enable_wait_var.get(),
+            "wait": s.wait_var.get(),
+        }
+
+    def _save_ui_state(s):
+        """保存界面控件状态到本地文件"""
+        if s._state_save_job:
+            s.rt.after_cancel(s._state_save_job)
+            s._state_save_job = None
+
+        try:
+            state = s._collect_ui_state()
+            with open(s.state_file, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _load_ui_state(s):
+        """加载并恢复界面控件状态"""
+        if not os.path.exists(s.state_file):
+            return False
+
+        try:
+            with open(s.state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except Exception:
+            return False
+
+        geometry_restored = False
+        s._restoring_state = True
+        try:
+            if state.get("mode") in {"endless", "topics", "time"}:
+                s.mode_var.set(state["mode"])
+            if "topics" in state:
+                s.topics_var.set(str(state["topics"]))
+            if "time" in state:
+                s.time_var.set(str(state["time"]))
+            if state.get("browse_mode") in {"deep", "quick"}:
+                s.browse_mode_var.set(state["browse_mode"])
+            if "proxy" in state:
+                s.proxy_var.set(str(state["proxy"]))
+            if "browser_path" in state:
+                s.browser_path_var.set(str(state["browser_path"]))
+            if "enable_like" in state:
+                s.enable_like_var.set(bool(state["enable_like"]))
+            if "like_rate" in state:
+                s.like_var.set(str(state["like_rate"]))
+            if "enable_reply" in state:
+                s.enable_reply_var.set(bool(state["enable_reply"]))
+            if "reply_rate" in state:
+                s.reply_var.set(str(state["reply_rate"]))
+            if "enable_wait" in state:
+                s.enable_wait_var.set(bool(state["enable_wait"]))
+            if "wait" in state:
+                s.wait_var.set(str(state["wait"]))
+
+            categories = state.get("categories", {})
+            for cat in s.cats:
+                name = cat["n"]
+                if name in categories:
+                    enabled = bool(categories[name])
+                    cat["e"] = enabled
+                    if name in s.cat_vars:
+                        s.cat_vars[name].set(enabled)
+
+            geometry = state.get("geometry", "")
+            if geometry:
+                try:
+                    s.rt.update_idletasks()
+                    s.rt.geometry(geometry)
+                    geometry_restored = True
+                except Exception:
+                    geometry_restored = False
+        finally:
+            s._restoring_state = False
+
+        return geometry_restored
 
     def _ui(s):
         # 状态变量（放在顶部，供其他地方使用）
@@ -2182,6 +2344,12 @@ class GUI:
                 cat["e"] = var.get()
                 break
 
+    def _sync_categories_from_vars(s):
+        """根据界面勾选状态同步板块配置"""
+        for cat in s.cats:
+            if cat["n"] in s.cat_vars:
+                cat["e"] = s.cat_vars[cat["n"]].get()
+
     def _on_reply_toggle(s):
         """自动回复开关切换时的处理"""
         if s.enable_reply_var.get():
@@ -2413,6 +2581,7 @@ class GUI:
         if s.th and s.th.is_alive():
             return
         # 更新配置
+        s._sync_categories_from_vars()
         s.cfg["proxy"] = s.proxy_var.get()
         s.cfg["browser_path"] = s.browser_path_var.get()
         try:
