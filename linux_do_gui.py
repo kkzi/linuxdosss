@@ -17,6 +17,7 @@ Linux.do 论坛刷帖助手 v8.4
 import sys, os, random, time, json, threading
 import urllib.request
 import urllib.error
+from urllib.parse import urlparse
 from datetime import datetime, date
 
 # Linux 输入法兼容性修复（必须在导入 tkinter 之前设置）
@@ -142,6 +143,53 @@ def create_tray_image(color="#0f3460"):
     return img
 
 
+# 站点配置
+LINUX_DO_BASE = "https://linux.do"
+LINUX_DO_CONNECT = "https://connect.linux.do"
+
+
+def normalize_site_url(url):
+    """规范化用户输入的站点地址"""
+    url = (url or "").strip()
+    if not url:
+        return LINUX_DO_BASE
+    if "://" not in url:
+        url = "https://" + url
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return LINUX_DO_BASE
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def is_linux_do_site(url):
+    parsed = urlparse(normalize_site_url(url))
+    return parsed.netloc.lower() == "linux.do"
+
+
+def discourse_categories_from_api(base_url, timeout=8):
+    """通过 Discourse /categories.json 获取分类。失败时返回空列表。"""
+    try:
+        req = urllib.request.Request(
+            normalize_site_url(base_url) + "/categories.json",
+            headers={"User-Agent": "LinuxDoHelper"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return []
+
+    categories = []
+    for cat in data.get("category_list", {}).get("categories", []):
+        if cat.get("read_restricted"):
+            continue
+        slug = cat.get("slug")
+        cat_id = cat.get("id")
+        name = cat.get("name") or slug or str(cat_id)
+        if slug and cat_id:
+            categories.append({"n": name, "u": f"/c/{slug}/{cat_id}", "e": True})
+    return categories
+
+
 # 板块配置
 CATS = [
     {"n": "开发调优", "u": "/c/develop/4", "e": True},
@@ -165,8 +213,9 @@ CATS = [
 CFG = {
     "proxy": "127.0.0.1:7897",
     "browser_path": "",
-    "base": "https://linux.do",
-    "connect": "https://connect.linux.do",
+    "base": LINUX_DO_BASE,
+    "connect": LINUX_DO_CONNECT,
+    "is_linux_do": True,
     "like_rate": 0.3,
     "reply_rate": 0.05,
     "like_reply_rate": 0.15,
@@ -421,8 +470,42 @@ class Bot:
 
         return False
 
+    def get_basic_user_info(s):
+        """从通用 Discourse 页面读取基础登录用户信息。"""
+        try:
+            info = s.pg.run_js("""
+            function getBasicUserInfo() {
+                const result = {username: '', level: '', nextLevel: '', requirements: []};
+                const user = document.querySelector('#current-user');
+                if (!user) return result;
+                const img = user.querySelector('img');
+                result.username = user.getAttribute('title') ||
+                    img?.getAttribute('title') ||
+                    img?.getAttribute('aria-label') ||
+                    img?.getAttribute('alt') ||
+                    '用户';
+                return result;
+            }
+            return getBasicUserInfo();
+            """)
+            if info:
+                s.user_info = info
+                if s.update_info:
+                    s.update_info(info, False)
+                s.lg("用户: " + info.get("username", "未知"))
+                return info
+        except Exception as e:
+            s.lg("获取用户信息失败: " + str(e))
+        return None
+
     def get_level_info(s, is_final=False):
         """获取等级信息"""
+        if not s.cfg.get("is_linux_do", True):
+            if is_final:
+                return s.user_info
+            s.lg("当前站点不是 linux.do，跳过专属等级进度获取")
+            return s.get_basic_user_info()
+
         s.lg("获取等级信息...")
         try:
             # 如果是最终获取，先强制刷新页面确保数据最新
@@ -589,31 +672,32 @@ class Bot:
 
     def get_topics(s, cat):
         """使用JS获取帖子列表（按回复数排序）"""
-        url = s.cfg["base"] + cat["u"]
-        s.lg("进入板块: " + cat["n"])
+        url = s.cfg["base"] + cat.get("u", "/latest")
+        s.lg("进入板块: " + cat.get("n", "最新"))
         s.pg.get(url)
         s._random_delay(2, 4, "页面加载")
 
         # 点击"回复"按钮进行排序
-        s.lg("点击'回复'按钮进行排序...")
-        clicked = s.pg.run_js("""
-        function clickRepliesSort() {
-            // 查找回复排序按钮
-            const replyButton = document.querySelector('th[data-sort-order="posts"] button');
-            if (replyButton) {
-                replyButton.click();
-                return true;
+        if s.cfg.get("is_linux_do", True):
+            s.lg("点击'回复'按钮进行排序...")
+            clicked = s.pg.run_js("""
+            function clickRepliesSort() {
+                // 查找回复排序按钮
+                const replyButton = document.querySelector('th[data-sort-order="posts"] button');
+                if (replyButton) {
+                    replyButton.click();
+                    return true;
+                }
+                return false;
             }
-            return false;
-        }
-        return clickRepliesSort();
-        """)
+            return clickRepliesSort();
+            """)
 
-        if clicked:
-            s.lg("已点击回复排序按钮")
-            time.sleep(2)  # 等待排序完成
-        else:
-            s.lg("未找到回复排序按钮，使用默认排序")
+            if clicked:
+                s.lg("已点击回复排序按钮")
+                time.sleep(2)  # 等待排序完成
+            else:
+                s.lg("未找到回复排序按钮，使用默认排序")
 
         # 使用JS获取帖子 - 优先获取未读话题（带小蓝点）
         topics = s.pg.run_js("""
@@ -681,6 +765,10 @@ class Bot:
                 return read
 
         return []
+
+    def get_latest_topics(s):
+        """使用通用 Discourse 最新列表作为无分类时的回退。"""
+        return s.get_topics({"n": "最新", "u": "/latest", "e": True})
 
     def get_floor_info(s):
         """获取楼层信息（当前楼层/总楼层）
@@ -1032,18 +1120,25 @@ class Bot:
             s.lg("浏览已读话题: " + title)
 
         try:
+            topic_url = topic.get("url", "")
+            topic_id_js = json.dumps(str(topic_id))
+            topic_url_js = json.dumps(topic_url)
             # 关键修改：通过点击链接进入话题，而不是直接 get URL
             # 这样才能让"浏览话题"计数增加
             clicked = s.pg.run_js(f"""
             function clickTopic() {{
+                const topicId = {topic_id_js};
+                const topicUrl = {topic_url_js};
                 // 查找对应的话题链接
-                const topicRow = document.querySelector('tr.topic-list-item[data-topic-id="{topic_id}"]');
-                if (!topicRow) {{
-                    console.log('未找到话题行');
-                    return false;
+                const topicRow = topicId ? document.querySelector(`tr.topic-list-item[data-topic-id="${{topicId}}"]`) : null;
+                let link = null;
+                if (topicRow) {{
+                    link = topicRow.querySelector('a.title.raw-link.raw-topic-link');
                 }}
-
-                const link = topicRow.querySelector('a.title.raw-link.raw-topic-link');
+                if (!link && topicUrl) {{
+                    const links = Array.from(document.querySelectorAll('a.title.raw-link.raw-topic-link'));
+                    link = links.find(a => a.getAttribute('href') === topicUrl);
+                }}
                 if (!link) {{
                     console.log('未找到话题链接');
                     return false;
@@ -1268,6 +1363,9 @@ class Bot:
 
             # 获取启用的板块
             enabled = [c for c in s.cats if c.get("e", True)]
+            if not enabled:
+                enabled = [{"n": "最新", "u": "/latest", "e": True}]
+                s.lg("未配置板块，使用 Discourse 最新列表 /latest")
             random.shuffle(enabled)
 
             # 显示运行模式
@@ -1396,7 +1494,7 @@ class Bot:
             s.lg("=" * 30)
 
             # 重新获取等级信息以验证效果（在关闭浏览器前）
-            if s.pg:
+            if s.pg and s.cfg.get("is_linux_do", True):
                 s.lg("")
                 s.lg("=" * 30)
                 s.lg("重新获取等级信息验证效果...")
@@ -1444,6 +1542,44 @@ class Bot:
                 s.close()
 
 
+class ToolTip:
+    """简单悬浮提示。"""
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        widget.bind("<Enter>", self.show, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+
+    def show(self, event=None):
+        if self.tip or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            self.tip,
+            text=self.text,
+            bg="#0f3460",
+            fg="#eaeaea",
+            relief=tk.SOLID,
+            borderwidth=1,
+            font=(FONT_FAMILY, 9),
+            justify=tk.LEFT,
+            padx=8,
+            pady=5,
+        )
+        label.pack()
+
+    def hide(self, event=None):
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
 class GUI:
     def __init__(s):
         s.rt = tk.Tk()
@@ -1465,6 +1601,9 @@ class GUI:
 
         s.cats = [c.copy() for c in CATS]
         s.cfg = CFG.copy()
+        s.site_history = [LINUX_DO_BASE]
+        s.current_site = LINUX_DO_BASE
+        s.categories_site = LINUX_DO_BASE
         s.bot = None
         s.th = None
         s.req_labels = {}  # 升级要求标签
@@ -1729,6 +1868,7 @@ class GUI:
     def _bind_state_persistence(s):
         """绑定界面状态自动保存"""
         tracked_vars = [
+            s.site_var,
             s.mode_var,
             s.topics_var,
             s.time_var,
@@ -1747,7 +1887,15 @@ class GUI:
         for var in tracked_vars:
             var.trace_add("write", s._on_ui_state_change)
 
+        s.site_var.trace_add("write", s._on_site_var_change)
+
         s.rt.bind("<Configure>", s._on_window_configure, add="+")
+
+    def _on_site_var_change(s, *args):
+        """站点输入变化后刷新 Linux.do 专属 UI 显示状态。"""
+        if s._restoring_state:
+            return
+        s._apply_site_ui_state()
 
     def _on_ui_state_change(s, *args):
         """界面控件变更后延迟保存，避免频繁写盘"""
@@ -1770,6 +1918,9 @@ class GUI:
         """收集当前界面控件状态"""
         return {
             "geometry": s.rt.geometry(),
+            "site": s.site_var.get(),
+            "site_history": s.site_history,
+            "categories_site": s.categories_site,
             "mode": s.mode_var.get(),
             "topics": s.topics_var.get(),
             "time": s.time_var.get(),
@@ -1812,6 +1963,25 @@ class GUI:
         geometry_restored = False
         s._restoring_state = True
         try:
+            history = state.get("site_history", [])
+            if isinstance(history, list):
+                merged = [LINUX_DO_BASE]
+                for item in history:
+                    normalized = normalize_site_url(str(item))
+                    if normalized not in merged:
+                        merged.append(normalized)
+                s.site_history = merged[:20]
+                s.site_combo["values"] = s.site_history
+
+            if "site" in state:
+                s.site_var.set(normalize_site_url(str(state["site"])))
+            s.categories_site = normalize_site_url(
+                str(state.get("categories_site") or s.site_var.get())
+            )
+            if not is_linux_do_site(s.site_var.get()):
+                s.cats = []
+                s._render_categories()
+
             if state.get("mode") in {"endless", "topics", "time"}:
                 s.mode_var.set(state["mode"])
             if "topics" in state:
@@ -1838,13 +2008,14 @@ class GUI:
                 s.wait_var.set(str(state["wait"]))
 
             categories = state.get("categories", {})
-            for cat in s.cats:
-                name = cat["n"]
-                if name in categories:
-                    enabled = bool(categories[name])
-                    cat["e"] = enabled
-                    if name in s.cat_vars:
-                        s.cat_vars[name].set(enabled)
+            if is_linux_do_site(s.site_var.get()):
+                for cat in s.cats:
+                    name = cat["n"]
+                    if name in categories:
+                        enabled = bool(categories[name])
+                        cat["e"] = enabled
+                        if name in s.cat_vars:
+                            s.cat_vars[name].set(enabled)
 
             geometry = state.get("geometry", "")
             if geometry:
@@ -1857,6 +2028,8 @@ class GUI:
         finally:
             s._restoring_state = False
 
+        s._apply_site_ui_state()
+
         return geometry_restored
 
     def _ui(s):
@@ -1866,6 +2039,49 @@ class GUI:
         # 内容区域
         content = tk.Frame(s.rt, bg="#1a1a2e")
         content.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        # 站点选择栏
+        site_frame = tk.LabelFrame(
+            content,
+            text=" 站点 ",
+            bg="#1a1a2e",
+            fg="#00d9ff",
+            font=(FONT_FAMILY, 10, "bold"),
+        )
+        site_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        site_inner = tk.Frame(site_frame, bg="#1a1a2e")
+        site_inner.pack(fill=tk.X, padx=10, pady=6)
+
+        tk.Label(
+            site_inner,
+            text="Discourse:",
+            bg="#1a1a2e",
+            fg="#eaeaea",
+            font=(FONT_FAMILY, 9),
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        s.site_var = tk.StringVar(value=LINUX_DO_BASE)
+        s.site_combo = ttk.Combobox(
+            site_inner,
+            textvariable=s.site_var,
+            values=s.site_history,
+            width=36,
+        )
+        s.site_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        s.site_combo.bind("<<ComboboxSelected>>", lambda e: s._on_site_selected())
+        s.site_combo.bind("<Return>", lambda e: s._on_site_selected())
+        s.site_combo.bind("<FocusOut>", lambda e: s._on_site_selected())
+
+        s.load_cats_btn = tk.Button(
+            site_inner,
+            text="加载板块",
+            command=s._load_site_categories,
+            width=10,
+            bg="#0f3460",
+            fg="white",
+        )
+        s.load_cats_btn.pack(side=tk.LEFT)
 
         # 用户信息栏
         info_frame = tk.LabelFrame(
@@ -1891,20 +2107,30 @@ class GUI:
             fg="#eaeaea",
             font=(FONT_FAMILY, 10),
         ).pack(side=tk.LEFT, padx=10)
-        tk.Label(
+        s.level_widget = tk.Label(
             info_inner,
             textvariable=s.level_label,
             bg="#1a1a2e",
             fg="#00ff88",
             font=(FONT_FAMILY, 10, "bold"),
-        ).pack(side=tk.LEFT, padx=10)
-        tk.Label(
+        )
+        s.level_widget.pack(side=tk.LEFT, padx=10)
+        s.next_level_widget = tk.Label(
             info_inner,
             textvariable=s.next_level_label,
             bg="#1a1a2e",
             fg="#ffaa00",
             font=(FONT_FAMILY, 10),
-        ).pack(side=tk.LEFT, padx=10)
+        )
+        s.next_level_widget.pack(side=tk.LEFT, padx=10)
+        ToolTip(
+            s.level_widget,
+            "等级信息依赖 connect.linux.do，仅 linux.do 站点显示。",
+        )
+        ToolTip(
+            s.next_level_widget,
+            "升级进度依赖 connect.linux.do，仅 linux.do 站点显示。",
+        )
 
         # 升级进度面板（使用固定高度的Canvas实现滚动）
         progress_frame = tk.LabelFrame(
@@ -1914,6 +2140,7 @@ class GUI:
             fg="#00d9ff",
             font=(FONT_FAMILY, 10, "bold"),
         )
+        s.progress_frame = progress_frame
         progress_frame.pack(fill=tk.X, padx=15, pady=5)
 
         # 创建Canvas和滚动条
@@ -1946,6 +2173,7 @@ class GUI:
             fg="#00d9ff",
             font=(FONT_FAMILY, 10, "bold"),
         )
+        s.mode_frame = mode_frame
         mode_frame.pack(fill=tk.X, padx=15, pady=5)
 
         mode_inner = tk.Frame(mode_frame, bg="#1a1a2e")
@@ -2154,23 +2382,11 @@ class GUI:
             fg="#00d9ff",
             font=(FONT_FAMILY, 10, "bold"),
         )
+        s.cat_frame = left
         left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
 
         s.cat_vars = {}
-        for cat in s.cats:
-            var = tk.BooleanVar(value=cat.get("e", True))
-            s.cat_vars[cat["n"]] = var
-            cb = tk.Checkbutton(
-                left,
-                text=cat["n"],
-                variable=var,
-                bg="#1a1a2e",
-                fg="#eaeaea",
-                selectcolor="#0f3460",
-                activebackground="#1a1a2e",
-                command=lambda n=cat["n"], v=var: s._toggle_cat(n, v),
-            )
-            cb.pack(anchor=tk.W, pady=1)
+        s._render_categories()
 
         # 右侧
         right = tk.Frame(main, bg="#1a1a2e")
@@ -2337,6 +2553,119 @@ class GUI:
             fg="#eaeaea",
             font=(FONT_FAMILY, 10),
         ).pack(side=tk.LEFT, padx=10)
+
+    def _render_categories(s, saved_categories=None):
+        """按当前站点配置重建板块勾选区。"""
+        for widget in s.cat_frame.winfo_children():
+            widget.destroy()
+        s.cat_vars = {}
+
+        if not s.cats:
+            tk.Label(
+                s.cat_frame,
+                text="未加载板块\n运行时使用 /latest",
+                bg="#1a1a2e",
+                fg="#888888",
+                justify=tk.LEFT,
+                font=(FONT_FAMILY, 9),
+            ).pack(anchor=tk.W, padx=8, pady=8)
+            return
+
+        saved_categories = saved_categories or {}
+        for cat in s.cats:
+            if cat["n"] in saved_categories:
+                cat["e"] = bool(saved_categories[cat["n"]])
+            var = tk.BooleanVar(value=cat.get("e", True))
+            s.cat_vars[cat["n"]] = var
+            var.trace_add("write", s._on_ui_state_change)
+            cb = tk.Checkbutton(
+                s.cat_frame,
+                text=cat["n"],
+                variable=var,
+                bg="#1a1a2e",
+                fg="#eaeaea",
+                selectcolor="#0f3460",
+                activebackground="#1a1a2e",
+                command=lambda n=cat["n"], v=var: s._toggle_cat(n, v),
+            )
+            cb.pack(anchor=tk.W, pady=1)
+
+    def _on_site_selected(s):
+        s.site_var.set(normalize_site_url(s.site_var.get()))
+        s._apply_site_ui_state()
+        s._schedule_state_save()
+
+    def _remember_site(s, site):
+        site = normalize_site_url(site)
+        s.site_history = [x for x in s.site_history if x != site]
+        s.site_history.insert(0, site)
+        if LINUX_DO_BASE not in s.site_history:
+            s.site_history.append(LINUX_DO_BASE)
+        s.site_history = s.site_history[:20]
+        s.site_combo["values"] = s.site_history
+
+    def _apply_site_ui_state(s):
+        site = normalize_site_url(s.site_var.get())
+        linux_do = is_linux_do_site(site)
+        s.current_site = site
+
+        if linux_do:
+            s.level_widget.pack(side=tk.LEFT, padx=10)
+            s.next_level_widget.pack(side=tk.LEFT, padx=10)
+            if not s.progress_frame.winfo_ismapped():
+                s.progress_frame.pack(fill=tk.X, padx=15, pady=5, before=s.mode_frame)
+            if s.categories_site != LINUX_DO_BASE:
+                s.cats = [c.copy() for c in CATS]
+                s.categories_site = LINUX_DO_BASE
+                s._render_categories()
+        else:
+            s.level_widget.pack_forget()
+            s.next_level_widget.pack_forget()
+            s.progress_frame.pack_forget()
+            s.level_label.set("等级: -")
+            s.next_level_label.set("下一级: -")
+            s.initial_requirements = []
+            for widget in s.progress_inner.winfo_children():
+                widget.destroy()
+            s.req_labels = {}
+            if s.categories_site != site:
+                s.cats = []
+                s.categories_site = site
+                s._render_categories()
+
+    def _load_site_categories(s):
+        site = normalize_site_url(s.site_var.get())
+        s.site_var.set(site)
+        s._remember_site(site)
+        s._apply_site_ui_state()
+
+        if is_linux_do_site(site):
+            s.cats = [c.copy() for c in CATS]
+            s.categories_site = LINUX_DO_BASE
+            s._render_categories()
+            s._lg("linux.do 使用内置板块配置")
+            s._schedule_state_save()
+            return
+
+        s.load_cats_btn.config(state=tk.DISABLED, text="加载中")
+
+        def worker():
+            cats = discourse_categories_from_api(site)
+
+            def done():
+                s.load_cats_btn.config(state=tk.NORMAL, text="加载板块")
+                s.cats = cats
+                s.categories_site = site
+                s._render_categories()
+                if cats:
+                    s._lg(f"已从 {site}/categories.json 加载 {len(cats)} 个板块")
+                else:
+                    s._lg("未能通过 /categories.json 获取板块，运行时将使用 /latest")
+                s._schedule_state_save()
+
+            s.rt.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _toggle_cat(s, name, var):
         for cat in s.cats:
@@ -2581,9 +2910,16 @@ class GUI:
         if s.th and s.th.is_alive():
             return
         # 更新配置
+        site = normalize_site_url(s.site_var.get())
+        s.site_var.set(site)
+        s._remember_site(site)
+        s._apply_site_ui_state()
         s._sync_categories_from_vars()
         s.cfg["proxy"] = s.proxy_var.get()
         s.cfg["browser_path"] = s.browser_path_var.get()
+        s.cfg["base"] = site
+        s.cfg["is_linux_do"] = is_linux_do_site(site)
+        s.cfg["connect"] = LINUX_DO_CONNECT if s.cfg["is_linux_do"] else ""
         try:
             s.cfg["like_rate"] = int(s.like_var.get()) / 100
         except:
@@ -2630,9 +2966,13 @@ class GUI:
         enable_wait = s.enable_wait_var.get()
         browse_mode = s.browse_mode_var.get()
 
+        run_cats = [c.copy() for c in s.cats]
+        if not s.cfg["is_linux_do"] and s.categories_site != site:
+            run_cats = []
+
         s.bot = Bot(
             s.cfg,
-            s.cats,
+            run_cats,
             s._lg,
             s._update_info,
             s._update_progress,
