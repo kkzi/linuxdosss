@@ -331,6 +331,7 @@ class Bot:
         s.pg = None
         s.run = False
         s.stats = {"topic": 0, "like": 0, "reply": 0, "like_reply": 0, "floors": 0}
+        s.visited_ids = set()
         s.user_info = None
         s.level_requirements = []  # 保存升级要求
         s.initial_level_info = None  # 保存初始等级信息用于对比
@@ -677,8 +678,8 @@ class Bot:
         s.pg.get(url)
         s._random_delay(2, 4, "页面加载")
 
-        # 点击"回复"按钮进行排序
-        if s.cfg.get("is_linux_do", True):
+        # 点击"回复"按钮进行排序（话题模式保留 /latest 默认时间排序，不点击）
+        if s.cfg.get("is_linux_do", True) and not s.cfg.get("latest_mode"):
             s.lg("点击'回复'按钮进行排序...")
             clicked = s.pg.run_js("""
             function clickRepliesSort() {
@@ -1310,9 +1311,20 @@ class Bot:
         if not topics:
             return 0
 
-        # 随机选择几个帖子
-        count = min(random.randint(3, 8), len(topics))
-        selected = random.sample(topics, count)
+        # 选择本轮要浏览的帖子
+        if s.cfg.get("latest_mode"):
+            top10 = topics[:10]
+            pool = [t for t in top10 if str(t.get("id", "")) not in s.visited_ids]
+            if not pool:
+                pool = [t for t in topics if str(t.get("id", "")) not in s.visited_ids]
+            if not pool:
+                s.lg("话题模式：列表内全部已读，跳过本轮")
+                return 0
+            selected = [random.choice(pool)]
+            s.lg(f"话题模式：从 {len(pool)} 个未访问话题中随机选 1 个")
+        else:
+            count = min(random.randint(3, 8), len(topics))
+            selected = random.sample(topics, count)
 
         browsed = 0
         for topic in selected:
@@ -1328,6 +1340,9 @@ class Bot:
             success = s.browse_topic(topic)
             if success:
                 browsed += 1
+                tid = str(topic.get("id", ""))
+                if tid:
+                    s.visited_ids.add(tid)
 
             # 再次检查是否已达到目标
             if s._check_target_reached():
@@ -1344,6 +1359,7 @@ class Bot:
     def run_session(s):
         s.run = True
         s.stats = {"topic": 0, "like": 0, "reply": 0, "like_reply": 0, "floors": 0}
+        s.visited_ids = set()
         s.start_time = time.time()  # 记录开始时间
 
         if not s.start():
@@ -1467,16 +1483,15 @@ class Bot:
                             s.cfg["wait_min"] + 1, s.cfg["wait_max"] + 2, "切换板块"
                         )
 
-                # 如果不是无尽模式或已达到目标，退出循环
-                if s.mode != "endless" or not s.run:
+                # 用户手动停止或已达成目标（由 _check_target_reached 设置 s.run=False）
+                if not s.run:
                     break
 
-                # 无尽模式：重新打乱板块顺序
-                if s.run:
-                    random.shuffle(enabled)
-                    s.lg("=" * 30)
-                    s.lg("继续下一轮浏览...")
-                    s.lg("=" * 30)
+                # 重新打乱板块顺序，继续下一轮
+                random.shuffle(enabled)
+                s.lg("=" * 30)
+                s.lg("继续下一轮浏览...")
+                s.lg("=" * 30)
 
             # 计算耗时
             elapsed_time = time.time() - s.start_time
