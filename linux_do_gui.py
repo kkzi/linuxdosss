@@ -2107,63 +2107,21 @@ class GUI:
             fg="#eaeaea",
             font=(FONT_FAMILY, 10),
         ).pack(side=tk.LEFT, padx=10)
-        s.level_widget = tk.Label(
+
+        s.level_dialog = None
+        s.level_btn = tk.Button(
             info_inner,
-            textvariable=s.level_label,
-            bg="#1a1a2e",
-            fg="#00ff88",
-            font=(FONT_FAMILY, 10, "bold"),
+            text="📊 升级进度",
+            command=s._open_level_dialog,
+            bg="#0f3460",
+            fg="white",
+            activebackground="#16213e",
+            activeforeground="#00d9ff",
+            font=(FONT_FAMILY, 9),
+            relief=tk.FLAT,
+            padx=10,
         )
-        s.level_widget.pack(side=tk.LEFT, padx=10)
-        s.next_level_widget = tk.Label(
-            info_inner,
-            textvariable=s.next_level_label,
-            bg="#1a1a2e",
-            fg="#ffaa00",
-            font=(FONT_FAMILY, 10),
-        )
-        s.next_level_widget.pack(side=tk.LEFT, padx=10)
-        ToolTip(
-            s.level_widget,
-            "等级信息依赖 connect.linux.do，仅 linux.do 站点显示。",
-        )
-        ToolTip(
-            s.next_level_widget,
-            "升级进度依赖 connect.linux.do，仅 linux.do 站点显示。",
-        )
-
-        # 升级进度面板（使用固定高度的Canvas实现滚动）
-        progress_frame = tk.LabelFrame(
-            content,
-            text=" 升级进度追踪 ",
-            bg="#1a1a2e",
-            fg="#00d9ff",
-            font=(FONT_FAMILY, 10, "bold"),
-        )
-        s.progress_frame = progress_frame
-        progress_frame.pack(fill=tk.X, padx=15, pady=5)
-
-        # 创建Canvas和滚动条
-        s.progress_canvas = tk.Canvas(
-            progress_frame, bg="#1a1a2e", height=200, highlightthickness=0
-        )
-        s.progress_scrollbar = ttk.Scrollbar(
-            progress_frame, orient="vertical", command=s.progress_canvas.yview
-        )
-        s.progress_inner = tk.Frame(s.progress_canvas, bg="#1a1a2e")
-
-        s.progress_inner.bind(
-            "<Configure>",
-            lambda e: s.progress_canvas.configure(
-                scrollregion=s.progress_canvas.bbox("all")
-            ),
-        )
-
-        s.progress_canvas.create_window((0, 0), window=s.progress_inner, anchor="nw")
-        s.progress_canvas.configure(yscrollcommand=s.progress_scrollbar.set)
-
-        s.progress_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
-        s.progress_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+        ToolTip(s.level_btn, "查看等级与升级进度（仅 linux.do 站点）")
 
         # 运行模式选择
         mode_frame = tk.LabelFrame(
@@ -2385,6 +2343,32 @@ class GUI:
         s.cat_frame = left
         left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
 
+        s.cat_canvas = tk.Canvas(
+            left, bg="#1a1a2e", highlightthickness=0, width=160, height=420
+        )
+        s.cat_scrollbar = ttk.Scrollbar(
+            left, orient="vertical", command=s.cat_canvas.yview
+        )
+        s.cat_inner = tk.Frame(s.cat_canvas, bg="#1a1a2e")
+        s.cat_inner.bind(
+            "<Configure>",
+            lambda e: s.cat_canvas.configure(scrollregion=s.cat_canvas.bbox("all")),
+        )
+        s.cat_canvas.create_window((0, 0), window=s.cat_inner, anchor="nw")
+        s.cat_canvas.configure(yscrollcommand=s.cat_scrollbar.set)
+        s.cat_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        s.cat_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _cat_wheel(event):
+            delta = -1 if event.delta > 0 else 1
+            s.cat_canvas.yview_scroll(delta, "units")
+
+        for w in (s.cat_canvas, s.cat_inner):
+            w.bind("<MouseWheel>", _cat_wheel)
+            w.bind("<Button-4>", lambda e: s.cat_canvas.yview_scroll(-1, "units"))
+            w.bind("<Button-5>", lambda e: s.cat_canvas.yview_scroll(1, "units"))
+        s._cat_wheel_handler = _cat_wheel
+
         s.cat_vars = {}
         s._render_categories()
 
@@ -2556,19 +2540,20 @@ class GUI:
 
     def _render_categories(s, saved_categories=None):
         """按当前站点配置重建板块勾选区。"""
-        for widget in s.cat_frame.winfo_children():
+        for widget in s.cat_inner.winfo_children():
             widget.destroy()
         s.cat_vars = {}
 
         if not s.cats:
             tk.Label(
-                s.cat_frame,
+                s.cat_inner,
                 text="未加载板块\n运行时使用 /latest",
                 bg="#1a1a2e",
                 fg="#888888",
                 justify=tk.LEFT,
                 font=(FONT_FAMILY, 9),
             ).pack(anchor=tk.W, padx=8, pady=8)
+            s.cat_canvas.yview_moveto(0)
             return
 
         saved_categories = saved_categories or {}
@@ -2579,7 +2564,7 @@ class GUI:
             s.cat_vars[cat["n"]] = var
             var.trace_add("write", s._on_ui_state_change)
             cb = tk.Checkbutton(
-                s.cat_frame,
+                s.cat_inner,
                 text=cat["n"],
                 variable=var,
                 bg="#1a1a2e",
@@ -2588,7 +2573,12 @@ class GUI:
                 activebackground="#1a1a2e",
                 command=lambda n=cat["n"], v=var: s._toggle_cat(n, v),
             )
-            cb.pack(anchor=tk.W, pady=1)
+            cb.pack(anchor=tk.W, padx=4, pady=1)
+            cb.bind("<MouseWheel>", s._cat_wheel_handler)
+            cb.bind("<Button-4>", lambda e: s.cat_canvas.yview_scroll(-1, "units"))
+            cb.bind("<Button-5>", lambda e: s.cat_canvas.yview_scroll(1, "units"))
+
+        s.cat_canvas.yview_moveto(0)
 
     def _on_site_selected(s):
         s.site_var.set(normalize_site_url(s.site_var.get()))
@@ -2610,24 +2600,26 @@ class GUI:
         s.current_site = site
 
         if linux_do:
-            s.level_widget.pack(side=tk.LEFT, padx=10)
-            s.next_level_widget.pack(side=tk.LEFT, padx=10)
-            if not s.progress_frame.winfo_ismapped():
-                s.progress_frame.pack(fill=tk.X, padx=15, pady=5, before=s.mode_frame)
+            if not s.level_btn.winfo_ismapped():
+                s.level_btn.pack(side=tk.LEFT, padx=10)
             if s.categories_site != LINUX_DO_BASE:
                 s.cats = [c.copy() for c in CATS]
                 s.categories_site = LINUX_DO_BASE
                 s._render_categories()
         else:
-            s.level_widget.pack_forget()
-            s.next_level_widget.pack_forget()
-            s.progress_frame.pack_forget()
+            s.level_btn.pack_forget()
             s.level_label.set("等级: -")
             s.next_level_label.set("下一级: -")
             s.initial_requirements = []
-            for widget in s.progress_inner.winfo_children():
-                widget.destroy()
             s.req_labels = {}
+            if s.level_dialog is not None:
+                try:
+                    s.level_dialog.withdraw()
+                    if hasattr(s, "progress_inner") and s.progress_inner.winfo_exists():
+                        for w in s.progress_inner.winfo_children():
+                            w.destroy()
+                except Exception:
+                    pass
             if s.categories_site != site:
                 s.cats = []
                 s.categories_site = site
@@ -2708,15 +2700,11 @@ class GUI:
             if info.get("nextLevel"):
                 s.next_level_label.set("下一级: " + info["nextLevel"] + "级")
 
-            # 更新升级进度面板
             requirements = info.get("requirements", [])
             if requirements:
                 if not s.initial_requirements:
-                    # 首次获取，保存初始值
-                    s.initial_requirements = requirements.copy()
-                    s._build_progress_panel(requirements)
+                    s._init_progress_data(requirements)
                 elif is_final:
-                    # 结束时更新，显示实际变化
                     s._update_final_progress(requirements)
 
         s.rt.after(0, update)
@@ -2744,23 +2732,48 @@ class GUI:
                 except:
                     labels["current_var"].set(new_current)
 
-    def _build_progress_panel(s, requirements):
-        """构建升级进度面板"""
-        # 清除旧内容
-        for widget in s.progress_inner.winfo_children():
-            widget.destroy()
+    def _init_progress_data(s, requirements):
+        """缓存升级要求数据并准备 StringVar；弹窗已打开则同步渲染。"""
+        s.initial_requirements = requirements.copy()
         s.req_labels = {}
+        for req in requirements[:8]:
+            name = req.get("name", "")
+            current = req.get("current", "0")
+            s.req_labels[name] = {
+                "initial": current,
+                "required": req.get("required", "0"),
+                "current_var": tk.StringVar(master=s.rt, value=current),
+                "added_var": tk.StringVar(master=s.rt, value="+0"),
+            }
+        s._render_progress_table()
 
-        # 创建表格头
+    def _render_progress_table(s):
+        """在弹窗的 progress_inner 容器中渲染进度表（依赖 req_labels 中的 StringVar）。"""
+        if s.level_dialog is None:
+            return
+        parent = getattr(s, "progress_inner", None)
+        if parent is None or not parent.winfo_exists():
+            return
+
+        for widget in parent.winfo_children():
+            widget.destroy()
+
+        if not s.req_labels:
+            tk.Label(
+                parent,
+                text="尚未获取到升级进度数据，请先启动浏览。",
+                bg="#1a1a2e",
+                fg="#888888",
+                font=(FONT_FAMILY, 9),
+            ).pack(padx=10, pady=10)
+            return
+
         headers = ["指标", "初始值", "当前值", "目标值", "本次+"]
-        # 列宽设置为0表示自动适应内容宽度
-        col_widths = [0, 0, 0, 0, 0]
-        # 每列的左右间距 (padx)
         col_padx = [(10, 20), (10, 20), (10, 15), (10, 15), (10, 10)]
 
         for col, header in enumerate(headers):
             tk.Label(
-                s.progress_inner,
+                parent,
                 text=header,
                 bg="#1a1a2e",
                 fg="#00d9ff",
@@ -2768,15 +2781,9 @@ class GUI:
                 anchor="w",
             ).grid(row=0, column=col, padx=col_padx[col], pady=5, sticky="w")
 
-        # 创建数据行
-        for row, req in enumerate(requirements[:8], start=1):
-            name = req.get("name", "")
-            current = req.get("current", "0")
-            required = req.get("required", "0")
-
-            # 指标名
+        for row, (name, labels) in enumerate(s.req_labels.items(), start=1):
             tk.Label(
-                s.progress_inner,
+                parent,
                 text=name,
                 bg="#1a1a2e",
                 fg="#eaeaea",
@@ -2784,54 +2791,105 @@ class GUI:
                 anchor="w",
             ).grid(row=row, column=0, padx=col_padx[0], pady=3, sticky="w")
 
-            # 初始值
             tk.Label(
-                s.progress_inner,
-                text=current,
+                parent,
+                text=labels["initial"],
                 bg="#1a1a2e",
                 fg="#888888",
                 font=(FONT_FAMILY, 9),
                 anchor="w",
             ).grid(row=row, column=1, padx=col_padx[1], pady=3, sticky="w")
 
-            # 当前值（可更新）
-            current_var = tk.StringVar(value=current)
             tk.Label(
-                s.progress_inner,
-                textvariable=current_var,
+                parent,
+                textvariable=labels["current_var"],
                 bg="#1a1a2e",
                 fg="#00ff88",
                 font=(FONT_FAMILY, 9, "bold"),
                 anchor="w",
             ).grid(row=row, column=2, padx=col_padx[2], pady=3, sticky="w")
 
-            # 目标值
             tk.Label(
-                s.progress_inner,
-                text=required,
+                parent,
+                text=labels["required"],
                 bg="#1a1a2e",
                 fg="#ffaa00",
                 font=(FONT_FAMILY, 9),
                 anchor="w",
             ).grid(row=row, column=3, padx=col_padx[3], pady=3, sticky="w")
 
-            # 本次增加
-            added_var = tk.StringVar(value="+0")
             tk.Label(
-                s.progress_inner,
-                textvariable=added_var,
+                parent,
+                textvariable=labels["added_var"],
                 bg="#1a1a2e",
                 fg="#00d9ff",
                 font=(FONT_FAMILY, 9, "bold"),
                 anchor="w",
             ).grid(row=row, column=4, padx=col_padx[4], pady=3, sticky="w")
 
-            # 保存引用
-            s.req_labels[name] = {
-                "initial": current,
-                "current_var": current_var,
-                "added_var": added_var,
-            }
+    def _open_level_dialog(s):
+        """打开升级进度弹窗（单例，关闭时只 withdraw）。"""
+        if not is_linux_do_site(s.current_site):
+            return
+
+        if s.level_dialog is not None and s.level_dialog.winfo_exists():
+            try:
+                s.level_dialog.deiconify()
+                s.level_dialog.lift()
+                s.level_dialog.focus_set()
+                s._render_progress_table()
+                return
+            except Exception:
+                s.level_dialog = None
+
+        dlg = tk.Toplevel(s.rt)
+        dlg.title("升级进度")
+        dlg.configure(bg="#1a1a2e")
+        dlg.geometry("560x440")
+        dlg.transient(s.rt)
+        dlg.protocol("WM_DELETE_WINDOW", lambda: dlg.withdraw())
+
+        top = tk.Frame(dlg, bg="#1a1a2e")
+        top.pack(fill=tk.X, padx=15, pady=10)
+        tk.Label(
+            top,
+            textvariable=s.level_label,
+            bg="#1a1a2e",
+            fg="#00ff88",
+            font=(FONT_FAMILY, 11, "bold"),
+        ).pack(side=tk.LEFT, padx=10)
+        tk.Label(
+            top,
+            textvariable=s.next_level_label,
+            bg="#1a1a2e",
+            fg="#ffaa00",
+            font=(FONT_FAMILY, 11),
+        ).pack(side=tk.LEFT, padx=10)
+
+        pframe = tk.LabelFrame(
+            dlg,
+            text=" 升级进度追踪 ",
+            bg="#1a1a2e",
+            fg="#00d9ff",
+            font=(FONT_FAMILY, 10, "bold"),
+        )
+        pframe.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
+
+        canvas = tk.Canvas(pframe, bg="#1a1a2e", highlightthickness=0)
+        sb = ttk.Scrollbar(pframe, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas, bg="#1a1a2e")
+        inner.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=sb.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        sb.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+
+        s.progress_inner = inner
+        s.level_dialog = dlg
+        s._render_progress_table()
 
     def _update_progress(s, stats):
         """根据统计更新进度显示"""
