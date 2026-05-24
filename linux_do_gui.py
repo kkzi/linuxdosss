@@ -1362,11 +1362,15 @@ class Bot:
             s.get_level_info()
 
             # 获取启用的板块
-            enabled = [c for c in s.cats if c.get("e", True)]
-            if not enabled:
-                enabled = [{"n": "最新", "u": "/latest", "e": True}]
-                s.lg("未配置板块，使用 Discourse 最新列表 /latest")
-            random.shuffle(enabled)
+            if s.cfg.get("latest_mode"):
+                enabled = [{"n": "话题", "u": "/latest", "e": True}]
+                s.lg("模式：话题（/latest），跳过板块逐条阅读")
+            else:
+                enabled = [c for c in s.cats if c.get("e", True)]
+                if not enabled:
+                    enabled = [{"n": "最新", "u": "/latest", "e": True}]
+                    s.lg("未配置板块，使用 Discourse 最新列表 /latest")
+                random.shuffle(enabled)
 
             # 显示运行模式
             if s.mode == "topics":
@@ -1881,6 +1885,7 @@ class GUI:
             s.reply_var,
             s.enable_wait_var,
             s.wait_var,
+            s.latest_mode_var,
         ]
         tracked_vars.extend(s.cat_vars.values())
 
@@ -1928,6 +1933,7 @@ class GUI:
             "proxy": s.proxy_var.get(),
             "browser_path": s.browser_path_var.get(),
             "categories": {name: var.get() for name, var in s.cat_vars.items()},
+            "latest_mode": s.latest_mode_var.get(),
             "enable_like": s.enable_like_var.get(),
             "like_rate": s.like_var.get(),
             "enable_reply": s.enable_reply_var.get(),
@@ -2016,6 +2022,10 @@ class GUI:
                         cat["e"] = enabled
                         if name in s.cat_vars:
                             s.cat_vars[name].set(enabled)
+
+            if "latest_mode" in state:
+                s.latest_mode_var.set(bool(state["latest_mode"]))
+            s._sync_cat_disabled_state()
 
             geometry = state.get("geometry", "")
             if geometry:
@@ -2369,7 +2379,34 @@ class GUI:
             w.bind("<Button-5>", lambda e: s.cat_canvas.yview_scroll(1, "units"))
         s._cat_wheel_handler = _cat_wheel
 
+        # 顶部固定项：话题（/latest）
+        s.latest_mode_var = tk.BooleanVar(value=False)
+        s.latest_checkbox = tk.Checkbutton(
+            s.cat_inner,
+            text="话题  (/latest)",
+            variable=s.latest_mode_var,
+            bg="#1a1a2e",
+            fg="#00d9ff",
+            selectcolor="#0f3460",
+            activebackground="#1a1a2e",
+            activeforeground="#00d9ff",
+            font=(FONT_FAMILY, 9, "bold"),
+            command=s._on_latest_toggle,
+        )
+        s.latest_checkbox.pack(anchor=tk.W, padx=4, pady=(4, 2))
+        s.latest_checkbox.bind("<MouseWheel>", _cat_wheel)
+        s.latest_checkbox.bind("<Button-4>", lambda e: s.cat_canvas.yview_scroll(-1, "units"))
+        s.latest_checkbox.bind("<Button-5>", lambda e: s.cat_canvas.yview_scroll(1, "units"))
+        tk.Frame(s.cat_inner, bg="#0f3460", height=1).pack(fill=tk.X, padx=4, pady=2)
+
+        s.cat_list_frame = tk.Frame(s.cat_inner, bg="#1a1a2e")
+        s.cat_list_frame.pack(fill=tk.X)
+        s.cat_list_frame.bind("<MouseWheel>", _cat_wheel)
+        s.cat_list_frame.bind("<Button-4>", lambda e: s.cat_canvas.yview_scroll(-1, "units"))
+        s.cat_list_frame.bind("<Button-5>", lambda e: s.cat_canvas.yview_scroll(1, "units"))
+
         s.cat_vars = {}
+        s.cat_checkbuttons = {}
         s._render_categories()
 
         # 右侧
@@ -2540,13 +2577,14 @@ class GUI:
 
     def _render_categories(s, saved_categories=None):
         """按当前站点配置重建板块勾选区。"""
-        for widget in s.cat_inner.winfo_children():
+        for widget in s.cat_list_frame.winfo_children():
             widget.destroy()
         s.cat_vars = {}
+        s.cat_checkbuttons = {}
 
         if not s.cats:
             tk.Label(
-                s.cat_inner,
+                s.cat_list_frame,
                 text="未加载板块\n运行时使用 /latest",
                 bg="#1a1a2e",
                 fg="#888888",
@@ -2564,21 +2602,39 @@ class GUI:
             s.cat_vars[cat["n"]] = var
             var.trace_add("write", s._on_ui_state_change)
             cb = tk.Checkbutton(
-                s.cat_inner,
+                s.cat_list_frame,
                 text=cat["n"],
                 variable=var,
                 bg="#1a1a2e",
                 fg="#eaeaea",
                 selectcolor="#0f3460",
                 activebackground="#1a1a2e",
+                disabledforeground="#555555",
                 command=lambda n=cat["n"], v=var: s._toggle_cat(n, v),
             )
             cb.pack(anchor=tk.W, padx=4, pady=1)
             cb.bind("<MouseWheel>", s._cat_wheel_handler)
             cb.bind("<Button-4>", lambda e: s.cat_canvas.yview_scroll(-1, "units"))
             cb.bind("<Button-5>", lambda e: s.cat_canvas.yview_scroll(1, "units"))
+            s.cat_checkbuttons[cat["n"]] = cb
 
+        s._sync_cat_disabled_state()
         s.cat_canvas.yview_moveto(0)
+
+    def _on_latest_toggle(s):
+        """切换"话题"模式时联动板块勾选可用状态。"""
+        s._sync_cat_disabled_state()
+        s._schedule_state_save()
+
+    def _sync_cat_disabled_state(s):
+        """根据 latest_mode_var 置灰或恢复板块复选框。"""
+        disabled = getattr(s, "latest_mode_var", None) and s.latest_mode_var.get()
+        state = tk.DISABLED if disabled else tk.NORMAL
+        for cb in s.cat_checkbuttons.values():
+            try:
+                cb.config(state=state)
+            except Exception:
+                pass
 
     def _on_site_selected(s):
         s.site_var.set(normalize_site_url(s.site_var.get()))
@@ -2978,6 +3034,7 @@ class GUI:
         s.cfg["base"] = site
         s.cfg["is_linux_do"] = is_linux_do_site(site)
         s.cfg["connect"] = LINUX_DO_CONNECT if s.cfg["is_linux_do"] else ""
+        s.cfg["latest_mode"] = bool(s.latest_mode_var.get())
         try:
             s.cfg["like_rate"] = int(s.like_var.get()) / 100
         except:
